@@ -226,7 +226,9 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             # 3. 创建SMPL模型并附加体积功能
             import os
             model_type = 'smplx'  # 使用SMPLX模型
-            model_folder = "../../data/smplx_lockedhead_20230207/models_lockedhead"  # 使用实际路径
+            # model_folder = "../../data/smplx_lockedhead_20230207/models_lockedhead"  # 使用实际路径
+            model_folder = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
+                           "data", "smplx_lockedhead_20230207", "models_lockedhead")
             
             print(f"创建{model_type.upper()}模型，gender={gender}, model_folder={model_folder}")
             model = smplx.create(model_folder, model_type=model_type, gender=gender)
