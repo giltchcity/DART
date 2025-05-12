@@ -252,7 +252,7 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             print(f"- 关节: shape={joints.shape}, range=[{joints.min().item():.3f}, {joints.max().item():.3f}]")
             
             # 6. 验证VolumetricSMPL特有功能 - 自交叉检测
-            selfpen_loss = model.volume.selfpen_loss(smpl_output)
+            selfpen_loss = model.self_collision_loss(smpl_output)
             print(f"- 自交叉损失: {selfpen_loss.item():.5f}")
             
             # 7. 与场景的碰撞检测
