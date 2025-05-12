@@ -191,7 +191,7 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
 
         return motion_sequences, history_motion, transf_rotmat, transf_transl
         
-def validate_volsmpl_integration(motion_sequences, scene_assets, frame_idx=0):
+    def validate_volsmpl_integration(motion_sequences, scene_assets, frame_idx=0):
         """验证VolumetricSMPL与场景交互的集成，不影响主程序流程"""
         try:
             print("\n==== VolumetricSMPL集成验证 ====")
