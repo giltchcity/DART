@@ -190,7 +190,100 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             history_motion = dataset.normalize(history_motion)  # [B, T, D]
 
         return motion_sequences, history_motion, transf_rotmat, transf_transl
-
+        
+    def validate_volsmpl_integration(motion_sequences, scene_assets, frame_idx=0):
+        """验证VolumetricSMPL与场景交互的集成，不影响主程序流程"""
+        try:
+            print("\n==== VolumetricSMPL集成验证 ====")
+            import smplx
+            from VolumetricSMPL import attach_volume
+            
+            # 只选一个批次和一个帧进行验证
+            batch_idx = 0  # 使用第一个批次
+            
+            # 1. 提取SMPL参数
+            global_orient_matrix = motion_sequences['global_orient'][batch_idx, frame_idx].detach().cpu()  # [3, 3]
+            body_pose_matrix = motion_sequences['body_pose'][batch_idx, frame_idx].detach().cpu()         # [21, 3, 3]
+            transl = motion_sequences['transl'][batch_idx, frame_idx].detach().cpu()                      # [3]
+            betas = motion_sequences['betas'][batch_idx, frame_idx, :10].detach().cpu()                   # [10]
+            gender = motion_sequences['gender']
+            
+            # 2. 转换为轴角格式以适配SMPL前向传递
+            from pytorch3d import transforms
+            global_orient_aa = transforms.matrix_to_axis_angle(global_orient_matrix).unsqueeze(0)  # [1, 3]
+            body_pose_aa = transforms.matrix_to_axis_angle(body_pose_matrix)                       # [21, 3]
+            body_pose_aa_flat = body_pose_aa.reshape(1, -1)                                        # [1, 63]
+            transl = transl.unsqueeze(0)                                                           # [1, 3]
+            betas = betas.unsqueeze(0)                                                             # [1, 10]
+            
+            print(f"参数形状和值检查:")
+            print(f"- gender: {gender}")
+            print(f"- global_orient_aa: shape={global_orient_aa.shape}, range=[{global_orient_aa.min().item():.3f}, {global_orient_aa.max().item():.3f}]")
+            print(f"- body_pose_aa_flat: shape={body_pose_aa_flat.shape}, range=[{body_pose_aa_flat.min().item():.3f}, {body_pose_aa_flat.max().item():.3f}]")
+            print(f"- transl: shape={transl.shape}, value={transl[0].tolist()}")
+            print(f"- betas: shape={betas.shape}, range=[{betas.min().item():.3f}, {betas.max().item():.3f}]")
+            
+            # 3. 创建SMPL模型并附加体积功能
+            import os
+            model_type = 'smpl'  # 或根据需要选择'smplx'
+            model_folder = os.path.dirname(os.path.dirname(__file__)) + "/body_models/smpl"  # 假设路径，根据实际情况调整
+            
+            print(f"创建{model_type.upper()}模型，gender={gender}, model_folder={model_folder}")
+            model = smplx.create(model_folder, model_type=model_type, gender=gender)
+            attach_volume(model)
+            
+            # 4. 前向传递
+            smpl_output = model(
+                betas=betas,
+                global_orient=global_orient_aa,
+                body_pose=body_pose_aa_flat,
+                transl=transl,
+                return_verts=True,
+                pose2rot=True  # 使用轴角格式
+            )
+            
+            # 5. 验证输出
+            vertices = smpl_output.vertices
+            joints = smpl_output.joints
+            print(f"SMPL输出验证:")
+            print(f"- 顶点: shape={vertices.shape}, range=[{vertices.min().item():.3f}, {vertices.max().item():.3f}]")
+            print(f"- 关节: shape={joints.shape}, range=[{joints.min().item():.3f}, {joints.max().item():.3f}]")
+            
+            # 6. 验证VolumetricSMPL特有功能 - 自交叉检测
+            selfpen_loss = model.volume.selfpen_loss(smpl_output)
+            print(f"- 自交叉损失: {selfpen_loss.item():.5f}")
+            
+            # 7. 与场景的碰撞检测
+            # 从场景采样点进行碰撞测试
+            import torch
+            num_scene_points = 1000
+            
+            # 使用场景边界获取有意义的采样范围
+            scene_config = scene_assets['scene_sdf_config']
+            center = torch.tensor(scene_config['center'], dtype=torch.float32)
+            size = 1.0 / torch.tensor(scene_config['scale'], dtype=torch.float32)
+            
+            # 在场景范围内随机采样点
+            random_points = torch.rand(num_scene_points, 3) * size * 2 - size + center
+            
+            # 使用VolumetricSMPL计算SDF
+            sdf_values_volsmpl = model.volume.collision_loss(smpl_output, random_points, return_sdf=True)
+            
+            # 使用DART的SDF计算
+            sdf_values_dart = calc_point_sdf(scene_assets, random_points.unsqueeze(0))
+            
+            print(f"- 场景SDF比较 (随机{num_scene_points}点):")
+            print(f"  VolumetricSMPL人体SDF: range=[{sdf_values_volsmpl.min().item():.3f}, {sdf_values_volsmpl.max().item():.3f}]")
+            print(f"  DART场景SDF: range=[{sdf_values_dart.min().item():.3f}, {sdf_values_dart.max().item():.3f}]")
+            
+            print("==== 验证成功 ====\n")
+            return True
+        except Exception as e:
+            import traceback
+            print(f"VolumetricSMPL验证失败: {e}")
+            traceback.print_exc()
+            return False
+        
     optim_steps = optim_args.optim_steps
     lr = optim_args.optim_lr
     noise = torch.randn(num_rollout, batch_size, *denoiser_args.model_args.noise_shape,
@@ -213,6 +306,12 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
                                                                                                     history_motion_tensor,
                                                                                                     transf_rotmat,
                                                                                                     transf_transl)
+        try:
+            validate_volsmpl_integration(motion_sequences, scene_assets, frame_idx=0)
+        except Exception as e:
+            print(f"验证函数调用失败: {e}")
+
+        
         global_joints = motion_sequences['joints']  # [B, T, 22, 3]
         B, T, _, _ = global_joints.shape
         joints_sdf = calc_point_sdf(scene_assets, global_joints.reshape(1, -1, 3)).reshape(B, T, 22)
