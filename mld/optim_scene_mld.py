@@ -191,7 +191,7 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
 
         return motion_sequences, history_motion, transf_rotmat, transf_transl
         
-    def validate_volsmpl_integration(motion_sequences, scene_assets, frame_idx=0):
+def validate_volsmpl_integration(motion_sequences, scene_assets, frame_idx=0):
         """验证VolumetricSMPL与场景交互的集成，不影响主程序流程"""
         try:
             print("\n==== VolumetricSMPL集成验证 ====")
@@ -306,10 +306,13 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
                                                                                                     history_motion_tensor,
                                                                                                     transf_rotmat,
                                                                                                     transf_transl)
-        try:
-            validate_volsmpl_integration(motion_sequences, scene_assets, frame_idx=0)
-        except Exception as e:
-            print(f"验证函数调用失败: {e}")
+        # 仅在首次和最后一次迭代执行验证
+        if i == 0 or i == optim_steps - 1:
+            try:
+                print(f"\n[迭代 {i+1}/{optim_steps}] 执行VolumetricSMPL验证...")
+                validate_volsmpl_integration(motion_sequences, scene_assets, frame_idx=0)
+            except Exception as e:
+                print(f"验证函数调用失败: {e}")
 
         
         global_joints = motion_sequences['joints']  # [B, T, 22, 3]
