@@ -252,19 +252,16 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             print(f"- 顶点: shape={vertices.shape}, range=[{vertices.min().item():.3f}, {vertices.max().item():.3f}]")
             print(f"- 关节: shape={joints.shape}, range=[{joints.min().item():.3f}, {joints.max().item():.3f}]")
             
+            
             # 6. 验证VolumetricSMPL特有功能 - 自交叉检测
-            # selfpen_loss = model.volume.selfpen_loss(smpl_output)
-            # print(f"- 自交叉损失: {selfpen_loss.item():.5f}")
-            # 6. 验证VolumetricSMPL特有功能 - 自交叉检测
-            print(f"- 调用自交叉检测方法")
             # 创建full_pose属性，因为self_collision_loss需要它
             full_pose = torch.cat([global_orient_aa, body_pose_aa_flat], dim=1)
             smpl_output.full_pose = full_pose  # 添加必要的属性
             
             # 使用正确的方法名称
             selfpen_loss = model.volume.self_collision_loss(smpl_output)
-            print(f"- 自交叉损失: {selfpen_loss.item():.5f}")     
-
+            print(f"- 自交叉损失: {selfpen_loss.item():.5f}")
+            
             # 7. 与场景的碰撞检测
             # 从场景采样点进行碰撞测试
             import torch
@@ -278,15 +275,24 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             # 在场景范围内随机采样点
             random_points = torch.rand(num_scene_points, 3) * size * 2 - size + center
             
-            # 使用VolumetricSMPL计算SDF
-            sdf_values_volsmpl = model.volume.collision_loss(smpl_output, random_points, return_sdf=True)
+            # 使用VolumetricSMPL计算碰撞 - 注意参数顺序：点云在前，SMPL输出在后
+            # Change this line:
+            # collision_loss = model.volume.collision_loss(random_points.unsqueeze(0), smpl_output)
+            # The issue is that when ret_collision_mask parameter is not False, the collision_loss function returns a tuple of (loss, inds) instead of just the loss tensor.
+            
+            # To this (explicitly set ret_collision_mask to False):
+            collision_loss = model.volume.collision_loss(random_points.unsqueeze(0), smpl_output, ret_collision_mask=False)
+            
+            # Or alternatively, if you want to access just the first element of the tuple:
+            # collision_loss, _ = model.volume.collision_loss(random_points.unsqueeze(0), smpl_output)
+
+            print(f"- 碰撞损失: {collision_loss.item():.5f}")
             
             # 使用DART的SDF计算
             sdf_values_dart = calc_point_sdf(scene_assets, random_points.unsqueeze(0))
-            
-            print(f"- 场景SDF比较 (随机{num_scene_points}点):")
-            print(f"  VolumetricSMPL人体SDF: range=[{sdf_values_volsmpl.min().item():.3f}, {sdf_values_volsmpl.max().item():.3f}]")
-            print(f"  DART场景SDF: range=[{sdf_values_dart.min().item():.3f}, {sdf_values_dart.max().item():.3f}]")
+            print(f"- DART场景SDF: range=[{sdf_values_dart.min().item():.3f}, {sdf_values_dart.max().item():.3f}]")
+
+   
             
             print("==== 验证成功 ====\n")
             return True
