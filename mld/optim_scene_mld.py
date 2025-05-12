@@ -252,6 +252,16 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             print(f"- 关节: shape={joints.shape}, range=[{joints.min().item():.3f}, {joints.max().item():.3f}]")
             
             # 6. 验证VolumetricSMPL特有功能 - 自交叉检测
+            # 打印model和model.volume的类型
+            print(f"模型类型: {type(model).__name__}")
+            print(f"体积模块类型: {type(model.volume).__name__}")
+            
+            # 列出所有可用方法
+            print("可用方法:")
+            for method_name in dir(model.volume):
+                if not method_name.startswith('_'):
+                    print(f"- {method_name}")
+                    
             selfpen_loss = model.volume.selfpen_loss(smpl_output)
             print(f"- 自交叉损失: {selfpen_loss.item():.5f}")
             
