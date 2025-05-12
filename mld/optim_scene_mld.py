@@ -196,6 +196,7 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
         try:
             print("\n==== VolumetricSMPL集成验证 ====")
             import smplx
+            import torch  # 在这里添加 torch 导入
             from VolumetricSMPL import attach_volume
             
             # 只选一个批次和一个帧进行验证
@@ -252,9 +253,18 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             print(f"- 关节: shape={joints.shape}, range=[{joints.min().item():.3f}, {joints.max().item():.3f}]")
             
             # 6. 验证VolumetricSMPL特有功能 - 自交叉检测
-            selfpen_loss = model.volume.selfpen_loss(smpl_output)
-            print(f"- 自交叉损失: {selfpen_loss.item():.5f}")
+            # selfpen_loss = model.volume.selfpen_loss(smpl_output)
+            # print(f"- 自交叉损失: {selfpen_loss.item():.5f}")
+            # 6. 验证VolumetricSMPL特有功能 - 自交叉检测
+            print(f"- 调用自交叉检测方法")
+            # 创建full_pose属性，因为self_collision_loss需要它
+            full_pose = torch.cat([global_orient_aa, body_pose_aa_flat], dim=1)
+            smpl_output.full_pose = full_pose  # 添加必要的属性
             
+            # 使用正确的方法名称
+            selfpen_loss = model.volume.self_collision_loss(smpl_output)
+            print(f"- 自交叉损失: {selfpen_loss.item():.5f}")     
+
             # 7. 与场景的碰撞检测
             # 从场景采样点进行碰撞测试
             import torch
