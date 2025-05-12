@@ -192,24 +192,24 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
         return motion_sequences, history_motion, transf_rotmat, transf_transl
         
     def validate_volsmpl_integration(motion_sequences, scene_assets, frame_idx=0):
-        """验证VolumetricSMPL与场景交互的集成，不影响主程序流程"""
+        """Validate VolumetricSMPL integration with scene interaction, without affecting the main program flow"""
         try:
-            print("\n==== VolumetricSMPL集成验证 ====")
+            print("\n==== VolumetricSMPL Integration Validation ====")
             import smplx
-            import torch  # 在这里添加 torch 导入
+            import torch
             from VolumetricSMPL import attach_volume
             
-            # 只选一个批次和一个帧进行验证
-            batch_idx = 0  # 使用第一个批次
+            # Use only one batch and one frame for validation
+            batch_idx = 0  # Use the first batch
             
-            # 1. 提取SMPL参数
+            # 1. Extract SMPL parameters
             global_orient_matrix = motion_sequences['global_orient'][batch_idx, frame_idx].detach().cpu()  # [3, 3]
             body_pose_matrix = motion_sequences['body_pose'][batch_idx, frame_idx].detach().cpu()         # [21, 3, 3]
             transl = motion_sequences['transl'][batch_idx, frame_idx].detach().cpu()                      # [3]
             betas = motion_sequences['betas'][batch_idx, frame_idx, :10].detach().cpu()                   # [10]
             gender = motion_sequences['gender']
             
-            # 2. 转换为轴角格式以适配SMPL前向传递
+            # 2. Convert to axis-angle format for SMPL forward pass
             from pytorch3d import transforms
             global_orient_aa = transforms.matrix_to_axis_angle(global_orient_matrix).unsqueeze(0)  # [1, 3]
             body_pose_aa = transforms.matrix_to_axis_angle(body_pose_matrix)                       # [21, 3]
@@ -217,88 +217,83 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             transl = transl.unsqueeze(0)                                                           # [1, 3]
             betas = betas.unsqueeze(0)                                                             # [1, 10]
             
-            print(f"参数形状和值检查:")
+            print(f"Parameter shape and value check:")
             print(f"- gender: {gender}")
             print(f"- global_orient_aa: shape={global_orient_aa.shape}, range=[{global_orient_aa.min().item():.3f}, {global_orient_aa.max().item():.3f}]")
             print(f"- body_pose_aa_flat: shape={body_pose_aa_flat.shape}, range=[{body_pose_aa_flat.min().item():.3f}, {body_pose_aa_flat.max().item():.3f}]")
             print(f"- transl: shape={transl.shape}, value={transl[0].tolist()}")
             print(f"- betas: shape={betas.shape}, range=[{betas.min().item():.3f}, {betas.max().item():.3f}]")
             
-            # 3. 创建SMPL模型并附加体积功能
+            # 3. Create SMPL model and attach volume functionality
             import os
-            model_type = 'smplx'  # 使用SMPLX模型
-            # model_folder = "../../data/smplx_lockedhead_20230207/models_lockedhead"  # 使用实际路径
+            model_type = 'smplx'  # Use SMPLX model
             model_folder = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
                            "data", "smplx_lockedhead_20230207", "models_lockedhead")
             
-            print(f"创建{model_type.upper()}模型，gender={gender}, model_folder={model_folder}")
+            print(f"Creating {model_type.upper()} model, gender={gender}, model_folder={model_folder}")
             model = smplx.create(model_folder, model_type=model_type, gender=gender)
             attach_volume(model)
             
-            # 4. 前向传递
+            # 4. Forward pass
             smpl_output = model(
                 betas=betas,
                 global_orient=global_orient_aa,
                 body_pose=body_pose_aa_flat,
                 transl=transl,
                 return_verts=True,
-                pose2rot=True  # 使用轴角格式
+                pose2rot=True  # Use axis-angle format
             )
             
-            # 5. 验证输出
+            # 5. Validate output
             vertices = smpl_output.vertices
             joints = smpl_output.joints
-            print(f"SMPL输出验证:")
-            print(f"- 顶点: shape={vertices.shape}, range=[{vertices.min().item():.3f}, {vertices.max().item():.3f}]")
-            print(f"- 关节: shape={joints.shape}, range=[{joints.min().item():.3f}, {joints.max().item():.3f}]")
+            print(f"SMPL output validation:")
+            print(f"- vertices: shape={vertices.shape}, range=[{vertices.min().item():.3f}, {vertices.max().item():.3f}]")
+            print(f"- joints: shape={joints.shape}, range=[{joints.min().item():.3f}, {joints.max().item():.3f}]")
             
-            
-            # 6. 验证VolumetricSMPL特有功能 - 自交叉检测
-            # 创建full_pose属性，因为self_collision_loss需要它
+            # 6. Validate VolumetricSMPL-specific functionality - self-intersection detection
+            # Create full_pose attribute, as self_collision_loss needs it
             full_pose = torch.cat([global_orient_aa, body_pose_aa_flat], dim=1)
-            smpl_output.full_pose = full_pose  # 添加必要的属性
+            smpl_output.full_pose = full_pose  # Add necessary attribute
             
-            # 使用正确的方法名称
+            # Use the correct method name
             selfpen_loss = model.volume.self_collision_loss(smpl_output)
-            print(f"- 自交叉损失: {selfpen_loss.item():.5f}")
+            print(f"- self-intersection loss: {selfpen_loss.item():.5f}")
             
-            # 7. 与场景的碰撞检测
-            # 从场景采样点进行碰撞测试
-            import torch
+            # 7. Collision detection with the scene
+            # Sample points from the scene for collision testing
             num_scene_points = 1000
             
-            # 使用场景边界获取有意义的采样范围
+            # Get device information
+            device = scene_assets['scene_sdf_grid'].device
+            
+            # Use scene boundaries to get meaningful sampling range - ensure correct device
             scene_config = scene_assets['scene_sdf_config']
-            center = torch.tensor(scene_config['center'], dtype=torch.float32)
-            size = 1.0 / torch.tensor(scene_config['scale'], dtype=torch.float32)
+            center = torch.tensor(scene_config['center'], dtype=torch.float32, device=device)
+            size = 1.0 / torch.tensor(scene_config['scale'], dtype=torch.float32, device=device)
             
-            # 在场景范围内随机采样点
-            random_points = torch.rand(num_scene_points, 3) * size * 2 - size + center
+            # Sample random points within scene range - create directly on correct device
+            random_points = torch.rand(num_scene_points, 3, device=device) * size * 2 - size + center
             
-            # 使用VolumetricSMPL计算碰撞 - 注意参数顺序：点云在前，SMPL输出在后
-            # Change this line:
-            # collision_loss = model.volume.collision_loss(random_points.unsqueeze(0), smpl_output)
-            # The issue is that when ret_collision_mask parameter is not False, the collision_loss function returns a tuple of (loss, inds) instead of just the loss tensor.
+            # Use VolumetricSMPL to calculate collision - move smpl_output to correct device
+            for key in smpl_output.__dict__:
+                attr = getattr(smpl_output, key)
+                if torch.is_tensor(attr):
+                    setattr(smpl_output, key, attr.to(device))
             
-            # To this (explicitly set ret_collision_mask to False):
-            collision_loss = model.volume.collision_loss(random_points.unsqueeze(0), smpl_output, ret_collision_mask=False)
+            # Unpack the returned tuple
+            collision_loss, _ = model.volume.collision_loss(random_points.unsqueeze(0), smpl_output)
+            print(f"- collision loss: {collision_loss.item():.5f}")
             
-            # Or alternatively, if you want to access just the first element of the tuple:
-            # collision_loss, _ = model.volume.collision_loss(random_points.unsqueeze(0), smpl_output)
-
-            print(f"- 碰撞损失: {collision_loss.item():.5f}")
-            
-            # 使用DART的SDF计算
+            # Use DART's SDF calculation
             sdf_values_dart = calc_point_sdf(scene_assets, random_points.unsqueeze(0))
-            print(f"- DART场景SDF: range=[{sdf_values_dart.min().item():.3f}, {sdf_values_dart.max().item():.3f}]")
-
-   
+            print(f"- DART scene SDF: range=[{sdf_values_dart.min().item():.3f}, {sdf_values_dart.max().item():.3f}]")
             
-            print("==== 验证成功 ====\n")
+            print("==== Validation successful ====\n")
             return True
         except Exception as e:
             import traceback
-            print(f"VolumetricSMPL验证失败: {e}")
+            print(f"VolumetricSMPL validation failed: {e}")
             traceback.print_exc()
             return False
         
