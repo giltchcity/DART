@@ -537,5 +537,3 @@ if __name__ == '__main__':
                 np.savez(f, **data_dict)
 
     print(f'[Done] Results are at [{out_path.absolute()}]')
-
-
