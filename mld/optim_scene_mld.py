@@ -101,6 +101,166 @@ def calc_jerk(joints):
 
     return jerk.mean()
 
+def create_scene_point_cloud(scene_mesh, num_points=8000, ensure_z_up=True, floor_height=0.0):
+    """
+    Convert a scene mesh to a point cloud representation.
+    
+    Args:
+        scene_mesh (trimesh.Trimesh): The scene mesh to convert
+        num_points (int): Number of points to sample from the mesh
+        ensure_z_up (bool): If True, ensure the scene is z-up
+        floor_height (float): The desired floor height (usually 0.0)
+    
+    Returns:
+        torch.Tensor: Scene point cloud of shape [num_points, 3]
+        torch.Tensor: Point normals of shape [num_points, 3]
+        dict: Metadata about the point cloud
+    """
+    # Make a copy to avoid modifying the original
+    mesh = scene_mesh.copy()
+    
+    # Check if scene is z-up and fix if needed
+    if ensure_z_up:
+        # Get the mesh bounds
+        bounds = mesh.bounds
+        min_z = bounds[0][2]
+        
+        # If floor isn't at the desired height, translate it
+        if abs(min_z - floor_height) > 1e-5:
+            translation = np.array([0, 0, floor_height - min_z])
+            mesh.apply_translation(translation)
+            print(f"Adjusted mesh to have floor at z={floor_height} (was at z={min_z})")
+    
+    # Sample points uniformly from the mesh surface
+    # The default is to sample uniformly by face area
+    points, face_indices = mesh.sample(num_points, return_index=True)
+    
+    # Get face normals for the sampled points
+    face_normals = mesh.face_normals[face_indices]
+    
+    # Convert to torch tensors
+    points_tensor = torch.tensor(points, dtype=torch.float32)
+    normals_tensor = torch.tensor(face_normals, dtype=torch.float32)
+    
+    # Create metadata
+    metadata = {
+        'num_points': num_points,
+        'bounds': mesh.bounds.tolist(),
+        'center': mesh.centroid.tolist(),
+        'floor_height': floor_height,
+        'has_normals': True
+    }
+    
+    return points_tensor, normals_tensor, metadata
+
+def create_scene_assets(scene_dir, floor_height=0.0, num_scene_points=8000, device="cuda"):
+    """Create scene assets including mesh, SDF, and point cloud representation"""
+    scene_with_floor_mesh = trimesh.load(scene_dir / 'scene_with_floor.obj', process=False, force='mesh')
+    
+    with open(scene_dir / 'scene_sdf.json', 'r') as f:
+        scene_sdf_config = json.load(f)
+    
+    scene_sdf_grid = np.load(scene_dir / 'scene_sdf.npy')
+    scene_sdf_grid = torch.tensor(scene_sdf_grid, dtype=torch.float32, device=device).unsqueeze(0)  # [1, size, size, size]
+    
+    # Generate point cloud representation
+    scene_points, scene_normals, scene_metadata = create_scene_point_cloud(
+        scene_with_floor_mesh,
+        num_points=num_scene_points,
+        ensure_z_up=True,
+        floor_height=floor_height
+    )
+    
+    # Move tensors to the right device
+    scene_points = scene_points.to(device)
+    scene_normals = scene_normals.to(device)
+    
+    scene_assets = {
+        'scene_with_floor_mesh': scene_with_floor_mesh,
+        'scene_sdf_grid': scene_sdf_grid,
+        'scene_sdf_config': scene_sdf_config,
+        'floor_height': floor_height,
+        'scene_points': scene_points,
+        'scene_normals': scene_normals,
+        'scene_metadata': scene_metadata
+    }
+    
+    return scene_assets
+
+def visualize_scene_with_smpl(scene_mesh, smpl_vertices, scene_points=None, collision_points=None):
+    """
+    Visualize scene mesh with SMPL human and optionally scene point cloud and collision points
+    
+    Args:
+        scene_mesh (trimesh.Trimesh): Scene mesh
+        smpl_vertices (torch.Tensor or np.ndarray): SMPL model vertices [batch_size, num_verts, 3]
+        scene_points (torch.Tensor or np.ndarray, optional): Scene point cloud
+        collision_points (torch.Tensor or np.ndarray, optional): Points where collisions occur
+    """
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    
+    # Convert to numpy if tensors
+    if torch.is_tensor(smpl_vertices):
+        smpl_vertices = smpl_vertices.detach().cpu().numpy()
+    if torch.is_tensor(scene_points) and scene_points is not None:
+        scene_points = scene_points.detach().cpu().numpy()
+    if torch.is_tensor(collision_points) and collision_points is not None:
+        collision_points = collision_points.detach().cpu().numpy()
+    
+    # Take first batch if batched
+    if smpl_vertices.ndim == 3:
+        smpl_vertices = smpl_vertices[0]
+    
+    # Create a new trimesh for SMPL
+    smpl_mesh = trimesh.Trimesh(vertices=smpl_vertices)
+    
+    # Combine meshes for visualization
+    combined_mesh = trimesh.util.concatenate([scene_mesh, smpl_mesh])
+    
+    # Export to temporary OBJ file and open with default viewer
+    # Or use trimesh's built-in viewer
+    combined_mesh.show()
+    
+    # If point cloud visualization is needed, use matplotlib
+    if scene_points is not None:
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Downsample for visualization if needed
+        max_points = 2000
+        if len(scene_points) > max_points:
+            indices = np.random.choice(len(scene_points), max_points, replace=False)
+            scene_points_viz = scene_points[indices]
+        else:
+            scene_points_viz = scene_points
+        
+        # Plot scene points
+        ax.scatter(scene_points_viz[:, 0], scene_points_viz[:, 1], scene_points_viz[:, 2], 
+                   c='blue', s=1, alpha=0.5, label='Scene Points')
+        
+        # Plot SMPL vertices (downsampled)
+        if len(smpl_vertices) > max_points:
+            indices = np.random.choice(len(smpl_vertices), max_points, replace=False)
+            smpl_vertices_viz = smpl_vertices[indices]
+        else:
+            smpl_vertices_viz = smpl_vertices
+        
+        ax.scatter(smpl_vertices_viz[:, 0], smpl_vertices_viz[:, 1], smpl_vertices_viz[:, 2], 
+                   c='green', s=1, alpha=0.5, label='SMPL Vertices')
+        
+        # Plot collision points if available
+        if collision_points is not None and len(collision_points) > 0:
+            ax.scatter(collision_points[:, 0], collision_points[:, 1], collision_points[:, 2], 
+                       c='red', s=5, alpha=1.0, label='Collisions')
+        
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.legend()
+        plt.title('Scene and SMPL Point Cloud Visualization')
+        plt.show()
+
 def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, goal_joints, joints_mask):
     texts = []
     if ',' in text_prompt:  # contain a time line of multipel actions
@@ -260,28 +420,27 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             selfpen_loss = model.volume.self_collision_loss(smpl_output)
             print(f"- self-intersection loss: {selfpen_loss.item():.5f}")
             
-            # 7. For collision detection, copy scene assets to CPU
-            cpu_scene_assets = {
-                'scene_with_floor_mesh': scene_assets['scene_with_floor_mesh'],
-                'scene_sdf_grid': scene_assets['scene_sdf_grid'].cpu(),
-                'scene_sdf_config': scene_assets['scene_sdf_config'],
-                'floor_height': scene_assets['floor_height'],
-            }
-            
-            # Sample points from the scene for collision testing
-            num_scene_points = 1000
-            
-            # Use scene boundaries to get meaningful sampling range
-            scene_config = cpu_scene_assets['scene_sdf_config']
-            center = torch.tensor(scene_config['center'], dtype=torch.float32)
-            size = 1.0 / torch.tensor(scene_config['scale'], dtype=torch.float32)
-            
-            # Sample random points within scene range
-            random_points = torch.rand(num_scene_points, 3) * size * 2 - size + center
-            
-            # Use VolumetricSMPL to calculate collision
-            collision_loss, _ = model.volume.collision_loss(random_points.unsqueeze(0), smpl_output)
-            print(f"- collision loss: {collision_loss.item():.5f}")
+            # 7. NEW: Use scene point cloud for collision detection
+            if 'scene_points' in scene_assets:
+                # Get scene points from assets
+                scene_points = scene_assets['scene_points'].cpu()
+                scene_normals = scene_assets['scene_normals'].cpu() if 'scene_normals' in scene_assets else None
+                
+                # Log scene point cloud info
+                print(f"- Scene point cloud: {scene_points.shape[0]} points")
+                
+                # Use VolumetricSMPL to calculate collision with scene
+                collision_loss, collision_data = model.volume.collision_loss(scene_points.unsqueeze(0), smpl_output)
+                print(f"- Scene collision loss: {collision_loss.item():.5f}")
+                
+                # If significant collision, print more details
+                if collision_loss.item() > 0.01 and 'penetration_depths' in collision_data:
+                    pen_depths = collision_data['penetration_depths']
+                    max_pen = pen_depths.max().item()
+                    mean_pen = pen_depths.mean().item()
+                    print(f"- Penetration depths: max={max_pen:.5f}, mean={mean_pen:.5f}")
+            else:
+                print("- No scene point cloud available for collision testing")
             
             # Skip DART's SDF calculation as it requires GPU tensors
             print("- Skipping DART scene SDF calculation for validation")
@@ -401,19 +560,14 @@ if __name__ == '__main__':
     interaction_name = interaction_cfg['interaction_name'].replace(' ', '_')
     scene_dir = Path(interaction_cfg['scene_dir'])
     scene_dir = Path(scene_dir)
-    scene_with_floor_mesh = trimesh.load(scene_dir / 'scene_with_floor.obj', process=False, force='mesh')
-    with open(scene_dir / 'scene_sdf.json', 'r') as f:
-        scene_sdf_config = json.load(f)
-    scene_sdf_grid = np.load(scene_dir / 'scene_sdf.npy')
-    scene_sdf_grid = torch.tensor(scene_sdf_grid, dtype=torch.float32, device=device).unsqueeze(
-        0)  # [1, size, size, size]
-
-    scene_assets = {
-        'scene_with_floor_mesh': scene_with_floor_mesh,
-        'scene_sdf_grid': scene_sdf_grid,
-        'scene_sdf_config': scene_sdf_config,
-        'floor_height': interaction_cfg['floor_height'],
-    }
+    
+    # Create scene assets including point cloud representation
+    scene_assets = create_scene_assets(
+        scene_dir=scene_dir,
+        floor_height=interaction_cfg['floor_height'],
+        num_scene_points=8000,  # Use 8K points for the scene representation
+        device=device
+    )
 
     out_path = optim_args.save_dir
     filename = f'guidance{optim_args.guidance_param}_seed{optim_args.seed}'
