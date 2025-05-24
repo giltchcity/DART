@@ -43,7 +43,7 @@ from pytorch3d.transforms import matrix_to_axis_angle
 
 debug = 0
 
-NUM_POINTS_SAMPLE_FOR_VOLSMPL = 100
+NUM_POINTS_SAMPLE_FOR_VOLSMPL = 1000
 
 # 添加新的配置参数
 COLLISION_DETECTION_RADIUS = 2.0  # 2米检测范围
