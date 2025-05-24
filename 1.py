@@ -49,6 +49,99 @@ NUM_POINTS_SAMPLE_FOR_VOLSMPL = 100
 COLLISION_DETECTION_RADIUS = 2.0  # 2米检测范围
 FRAME_SKIP_INTERVAL = 2  # 每两帧检测一次
 
+# SMPLX关节名称映射（54个关节）
+SMPLX_JOINT_NAMES = {
+    0: 'pelvis', 1: 'left_hip', 2: 'right_hip', 3: 'spine1', 
+    4: 'left_knee', 5: 'right_knee', 6: 'spine2', 7: 'left_ankle',
+    8: 'right_ankle', 9: 'spine3', 10: 'left_foot', 11: 'right_foot',
+    12: 'neck', 13: 'left_collar', 14: 'right_collar', 15: 'head',
+    16: 'left_shoulder', 17: 'right_shoulder', 18: 'left_elbow', 19: 'right_elbow',
+    20: 'left_wrist', 21: 'right_wrist', 22: 'jaw', 23: 'left_eye_smplhf', 
+    24: 'right_eye_smplhf',
+    # 手指关节
+    25: 'left_index1', 26: 'left_index2', 27: 'left_index3',
+    28: 'left_middle1', 29: 'left_middle2', 30: 'left_middle3',
+    31: 'left_pinky1', 32: 'left_pinky2', 33: 'left_pinky3',
+    34: 'left_ring1', 35: 'left_ring2', 36: 'left_ring3',
+    37: 'left_thumb1', 38: 'left_thumb2', 39: 'left_thumb3',
+    40: 'right_index1', 41: 'right_index2', 42: 'right_index3',
+    43: 'right_middle1', 44: 'right_middle2', 45: 'right_middle3',
+    46: 'right_pinky1', 47: 'right_pinky2', 48: 'right_pinky3',
+    49: 'right_ring1', 50: 'right_ring2', 51: 'right_ring3',
+    52: 'right_thumb1', 53: 'right_thumb2', 54: 'right_thumb3'
+}
+
+# 关节到身体部位的映射
+JOINT_TO_BODY_PART = {
+    # 头部和面部
+    15: 'head', 22: 'head', 23: 'head', 24: 'head',
+    # 颈部
+    12: 'neck',
+    # 躯干
+    0: 'pelvis', 3: 'lower_torso', 6: 'upper_torso', 9: 'chest',
+    # 左臂
+    13: 'left_shoulder', 16: 'left_shoulder', 18: 'left_upper_arm', 
+    20: 'left_forearm',
+    # 右臂
+    14: 'right_shoulder', 17: 'right_shoulder', 19: 'right_upper_arm',
+    21: 'right_forearm',
+    # 左腿
+    1: 'left_hip', 4: 'left_thigh', 7: 'left_shin', 10: 'left_foot',
+    # 右腿
+    2: 'right_hip', 5: 'right_thigh', 8: 'right_shin', 11: 'right_foot',
+    # 左手
+    25: 'left_hand', 26: 'left_hand', 27: 'left_hand', 28: 'left_hand',
+    29: 'left_hand', 30: 'left_hand', 31: 'left_hand', 32: 'left_hand',
+    33: 'left_hand', 34: 'left_hand', 35: 'left_hand', 36: 'left_hand',
+    37: 'left_hand', 38: 'left_hand', 39: 'left_hand',
+    # 右手
+    40: 'right_hand', 41: 'right_hand', 42: 'right_hand', 43: 'right_hand',
+    44: 'right_hand', 45: 'right_hand', 46: 'right_hand', 47: 'right_hand',
+    48: 'right_hand', 49: 'right_hand', 50: 'right_hand', 51: 'right_hand',
+    52: 'right_hand', 53: 'right_hand', 54: 'right_hand'
+}
+
+def get_body_part_from_vertex(vertex_pos, joints_pos, vertices_tensor):
+    """基于顶点位置和关节位置推断身体部位"""
+    # 计算顶点到各个关节的距离
+    distances = torch.cdist(vertex_pos.unsqueeze(0), joints_pos.unsqueeze(0))[0]
+    
+    # 找到最近的关节
+    nearest_joint_idx = torch.argmin(distances).item()
+    
+    # 映射到身体部位
+    if nearest_joint_idx in JOINT_TO_BODY_PART:
+        return JOINT_TO_BODY_PART[nearest_joint_idx]
+    else:
+        # 对于未映射的关节，返回通用部位
+        if nearest_joint_idx < 25:
+            return 'body'
+        elif nearest_joint_idx < 40:
+            return 'left_hand'
+        else:
+            return 'right_hand'
+
+def get_collision_body_parts_v2(collision_mask, vertices, joints):
+    """基于关节距离的方法来推断碰撞的身体部位"""
+    collision_indices = torch.where(collision_mask)[0]
+    body_parts = {}
+    
+    if len(collision_indices) == 0:
+        return body_parts
+    
+    # 获取碰撞顶点的位置
+    collision_vertices = vertices[collision_indices]
+    
+    for i, vertex_idx in enumerate(collision_indices):
+        vertex_pos = collision_vertices[i]
+        part = get_body_part_from_vertex(vertex_pos, joints[0], vertices)
+        
+        if part not in body_parts:
+            body_parts[part] = 0
+        body_parts[part] += 1
+    
+    return body_parts
+
 @dataclass
 class OptimArgs:
     seed: int = 0
@@ -106,9 +199,6 @@ def filter_scene_points_around_body(scene_points, body_center, radius=COLLISION_
         indices = nearest_indices
     
     filtered_points = scene_points[:, indices, :]
-    
-    print(f"    [DEBUG] 身体中心: {body_center.detach().cpu().numpy()}")
-    print(f"    [DEBUG] 场景点过滤: {scene_points.shape[1]} -> {filtered_points.shape[1]} (半径: {radius}m)")
     
     return filtered_points
 
@@ -269,8 +359,6 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
         for frame_idx in frame_indices:
             if frame_idx >= T:
                 continue
-                
-            print(f"  [DEBUG] --- 处理帧 {frame_idx}/{T-1} ---")
             
             # 获取当前帧的参数
             frame_transl = motion_sequences["transl"][:, frame_idx:frame_idx+1, :].reshape(B, 3)
@@ -280,15 +368,12 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             if 'model' not in scene_assets:
                 model = smplx.create(model_path="./data/smplx_lockedhead_20230207/models_lockedhead/smplx/SMPLX_NEUTRAL.npz", gender='neutral', use_pca=True, num_pca_comps=12, num_betas=10, batch_size=B).to(device)
                 scene_assets['model'] = attach_volume(model, pretrained=True, device=device)
-                print(f"    [DEBUG] 创建SMPL模型，批大小: {B}")
 
             smpl_output = scene_assets['model'](
                 transl=frame_transl,
                 global_orient=frame_global_orient,
                 body_pose=frame_body_pose,
                 return_verts=True, return_full_pose=True)
-
-            print(f"    [DEBUG] SMPL输出顶点形状: {smpl_output.vertices.shape}")
             
             # 获取身体中心并过滤场景点
             body_center = frame_transl[0]  # 使用第一个batch的pelvis位置
@@ -302,19 +387,35 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             del smpl_output
 
             frame_collision_loss = 0
-            for batch in smpl_output_batch:
-                loss = scene_assets['model'].volume.collision_loss(filtered_scene_points, batch, ret_collision_mask=None)
+            frame_has_collision = False
+            
+            for batch_idx, batch in enumerate(smpl_output_batch):
+                # 获取碰撞损失和碰撞mask
+                loss, collision_mask = scene_assets['model'].volume.collision_loss(
+                    filtered_scene_points, batch, ret_collision_mask=True)
 
                 if loss > 0:
                     frame_collision_loss += loss
                     collision_count += 1
-                    print(f"      [DEBUG] 检测到碰撞！损失: {loss.item():.6f}")
+                    frame_has_collision = True
+                    
+                    # 只在检测到碰撞时输出详细信息
+                    if collision_mask is not None:
+                        # 使用基于关节距离的方法
+                        collision_parts = get_collision_body_parts_v2(
+                            collision_mask, 
+                            batch.vertices[0],  # 当前batch的顶点
+                            batch.joints        # 当前batch的关节
+                        )
+                        if collision_parts:
+                            print(f"    [DEBUG] 帧 {frame_idx} - Batch {batch_idx}: 检测到碰撞！")
+                            print(f"      碰撞损失: {loss.item():.6f}")
+                            print(f"      碰撞身体部位: {', '.join([f'{part}({count}个顶点)' for part, count in collision_parts.items()])}")
 
                 del loss
                 del batch
 
             loss_collision += frame_collision_loss
-            print(f"    [DEBUG] 帧 {frame_idx} 碰撞损失: {frame_collision_loss.item() if hasattr(frame_collision_loss, 'item') else frame_collision_loss:.6f}")
 
         # 平均碰撞损失
         if len(frame_indices) > 0:
