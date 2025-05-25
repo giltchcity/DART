@@ -73,6 +73,7 @@ class OptimArgs:
     init_noise_scale: float = 1.0
 
     interaction_cfg: str = './data/optim_interaction/high_five.json'
+    interaction_frames: int = 5  # Number of frames at the end for interaction
 
 
 import torch.nn.functional as F
@@ -103,27 +104,48 @@ def calc_jerk(joints):
     jerk = jerk.amax(dim=[1, 2])
     return jerk.mean()
 
-def calc_interaction_loss(joints_person1, joints_person2, interaction_frame, interaction_type='high_five'):
-    """Calculate loss for human-human interaction"""
+def calc_interaction_loss(joints_person1, joints_person2, interaction_frames=10, interaction_type='high_five'):
+    """Calculate loss for human-human interaction over the last N frames"""
+    total_frames = joints_person1.shape[1]
+    
     if interaction_type == 'high_five':
-        # Get hand positions at interaction frame
-        left_hand_p1 = joints_person1[:, interaction_frame, LEFT_HAND_IDX]
-        right_hand_p1 = joints_person1[:, interaction_frame, RIGHT_HAND_IDX]
-        left_hand_p2 = joints_person2[:, interaction_frame, LEFT_HAND_IDX]
-        right_hand_p2 = joints_person2[:, interaction_frame, RIGHT_HAND_IDX]
+        # Get hand positions for the last interaction_frames
+        start_frame = max(0, total_frames - interaction_frames)
         
-        # Calculate distance between hands (person1's right hand with person2's left hand)
-        hand_distance = torch.norm(right_hand_p1 - left_hand_p2, dim=-1)
+        # Extract hand positions for both people in the interaction window
+        right_hand_p1 = joints_person1[:, start_frame:, RIGHT_HAND_IDX]  # [B, T, 3]
+        left_hand_p2 = joints_person2[:, start_frame:, LEFT_HAND_IDX]   # [B, T, 3]
         
-        # Loss encourages hands to be close at interaction frame
-        interaction_loss = hand_distance.mean()
+        # Calculate distance between hands for each frame
+        hand_distances = torch.norm(right_hand_p1 - left_hand_p2, dim=-1)  # [B, T]
         
-        # Also ensure hands are at reasonable height (around shoulder level)
+        # Loss encourages hands to be close during interaction frames
+        # Use mean across all interaction frames
+        interaction_loss = hand_distances.mean()
+        
+        # Optional: Add weight decay over time (earlier frames have less weight)
+        # This encourages hands to get progressively closer
+        time_weights = torch.linspace(0.5, 1.0, hand_distances.shape[1], device=hand_distances.device)
+        weighted_distances = hand_distances * time_weights.unsqueeze(0)
+        interaction_loss = weighted_distances.mean()
+        
+        # Ensure hands are at reasonable height (around shoulder level)
         target_height = 1.4  # meters
-        height_loss = (right_hand_p1[:, 2] - target_height).abs() + (left_hand_p2[:, 2] - target_height).abs()
-        height_loss = height_loss.mean()
+        height_diff_p1 = (right_hand_p1[:, :, 2] - target_height).abs()
+        height_diff_p2 = (left_hand_p2[:, :, 2] - target_height).abs()
+        height_loss = (height_diff_p1.mean() + height_diff_p2.mean()) * 0.5
         
-        return interaction_loss + 0.5 * height_loss
+        # Add velocity matching loss to ensure smooth high-five
+        if hand_distances.shape[1] > 1:
+            vel_p1 = right_hand_p1[:, 1:] - right_hand_p1[:, :-1]
+            vel_p2 = left_hand_p2[:, 1:] - left_hand_p2[:, :-1]
+            # In the last few frames, velocities should be similar (moving together)
+            vel_diff = torch.norm(vel_p1 + vel_p2, dim=-1)  # They should move in opposite directions
+            vel_loss = vel_diff[:, -5:].mean() if vel_diff.shape[1] >= 5 else vel_diff.mean()
+        else:
+            vel_loss = 0.0
+        
+        return interaction_loss + 0.3 * height_loss + 0.2 * vel_loss
     
     return 0.0
 
@@ -263,9 +285,6 @@ def optimize_two_person(history_motion_tensors, transf_rotmats, transf_transls, 
     optimizer = torch.optim.Adam(noises, lr=lr)
     criterion = torch.nn.HuberLoss(reduction='mean', delta=1.0)
     
-    # Get interaction frame
-    interaction_frame = interaction_config['interaction_frame']
-    
     for i in tqdm(range(optim_steps)):
         optimizer.zero_grad()
         if optim_args.optim_anneal_lr:
@@ -301,17 +320,14 @@ def optimize_two_person(history_motion_tensors, transf_rotmats, transf_transls, 
             
             total_loss += loss_joints + optim_args.weight_collision * loss_collision + optim_args.weight_jerk * loss_jerk
         
-        # Interaction loss between two people
-        if interaction_frame < motion_sequences_list[0]['joints'].shape[1]:
-            loss_interaction = calc_interaction_loss(
-                motion_sequences_list[0]['joints'], 
-                motion_sequences_list[1]['joints'],
-                interaction_frame,
-                interaction_config['interaction_type']
-            )
-            total_loss += optim_args.weight_interaction * loss_interaction
-        else:
-            loss_interaction = torch.tensor(0.0)
+        # Interaction loss between two people (calculated over last N frames)
+        loss_interaction = calc_interaction_loss(
+            motion_sequences_list[0]['joints'], 
+            motion_sequences_list[1]['joints'],
+            optim_args.interaction_frames,
+            interaction_config['interaction_type']
+        )
+        total_loss += optim_args.weight_interaction * loss_interaction
         
         total_loss.backward()
         
@@ -488,7 +504,7 @@ if __name__ == '__main__':
             'future_length': future_length,
             'person_id': person_idx,
             'interaction_type': interaction['interaction_type'],
-            'interaction_frame': interaction['interaction_frame'],
+            'interaction_frames': optim_args.interaction_frames,
         }
         tensor_dict_to_device(sequence, 'cpu')
         with open(out_path / f'person_{person_idx}_sample.pkl', 'wb') as f:
