@@ -73,7 +73,7 @@ class OptimArgs:
     init_noise_scale: float = 1.0
 
     interaction_cfg: str = './data/optim_interaction/high_five.json'
-    interaction_frames: int = 5  # Number of frames at the end for interaction
+    interaction_frames: int = 10  # Number of frames at the end for interaction
 
 
 import torch.nn.functional as F
@@ -128,8 +128,8 @@ def calc_interaction_loss(joints_person1, joints_person2, interaction_frames=10,
         hand_distances = torch.norm(right_hand_p1 - right_hand_p2, dim=-1)  # [B, T]
         
         # Define minimum distance to prevent overlap (e.g., 5cm)
-        min_distance = 0.1
-        target_distance = 0.16  # Target distance for high-five (8cm apart)
+        min_distance = 0.07
+        target_distance = 0.11  # Target distance for high-five (8cm apart)
         
         # Penalize both too far and too close
         distance_error = (hand_distances - target_distance).abs()
