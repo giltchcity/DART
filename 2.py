@@ -50,6 +50,10 @@ NUM_POINTS_SAMPLE_FOR_VOLSMPL = 3000  # 从100增加到3000
 COLLISION_DETECTION_RADIUS = 2.5  # 增加检测范围到2.5米
 FRAME_SKIP_INTERVAL = 2  # 每两帧检测一次
 
+
+
+# 2. 在你的导入部分后面，添加这些新函数：
+
 def get_collision_body_parts_spatial(collision_mask, vertices, smpl_output):
     """
     基于空间位置分析碰撞的身体部位
@@ -186,6 +190,8 @@ def get_collision_body_parts_spatial(collision_mask, vertices, smpl_output):
         'region': height_region,
         'detail': detail
     }
+
+
 
 @dataclass
 class OptimArgs:
@@ -443,9 +449,9 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             # 获取当前帧的关节位置用于改进的场景点过滤
             current_joints = motion_sequences['joints'][:, frame_idx, :, :]  # [B, 22, 3]
             
+            # print(f"    [DEBUG] 帧 {frame_idx}: 处理 {B} 个batch")
             
-            
-            # 为每个batch单独处理
+            # 为每个batch单独处理（修复的关键部分）
             for batch_idx in range(B):
                 total_collision_checks += 1
                 
@@ -497,6 +503,7 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
                             print(f"        位置细节: {collision_info['region']} - {collision_info['side']} - {collision_info['depth']}")
                             print(f"        人体位置: {batch_transl[0].detach().cpu().numpy()}")
                             print(f"        场景点数: {filtered_scene_points.shape[1]}")
+            
                 
                 # 清理内存
                 del loss
