@@ -104,6 +104,10 @@ def calc_jerk(joints):
     jerk = jerk.amax(dim=[1, 2])
     return jerk.mean()
 
+
+
+
+
 def calc_interaction_loss(joints_person1, joints_person2, interaction_frames=10, interaction_type='high_five'):
     """Calculate loss for human-human interaction over the last N frames"""
     total_frames = joints_person1.shape[1]
@@ -112,42 +116,83 @@ def calc_interaction_loss(joints_person1, joints_person2, interaction_frames=10,
         # Get hand positions for the last interaction_frames
         start_frame = max(0, total_frames - interaction_frames)
         
-        # Extract hand positions for both people in the interaction window
+        # Extract joint positions for both people
         right_hand_p1 = joints_person1[:, start_frame:, RIGHT_HAND_IDX]  # [B, T, 3]
-        left_hand_p2 = joints_person2[:, start_frame:, LEFT_HAND_IDX]   # [B, T, 3]
+        right_hand_p2 = joints_person2[:, start_frame:, RIGHT_HAND_IDX]  # [B, T, 3]
         
-        # Calculate distance between hands for each frame
-        hand_distances = torch.norm(right_hand_p1 - left_hand_p2, dim=-1)  # [B, T]
+        # Also get elbow positions to check arm orientation
+        right_elbow_p1 = joints_person1[:, start_frame:, 19]  # Right elbow index
+        right_elbow_p2 = joints_person2[:, start_frame:, 19]
         
-        # Loss encourages hands to be close during interaction frames
-        # Use mean across all interaction frames
-        interaction_loss = hand_distances.mean()
+        # Calculate distance between hands
+        hand_distances = torch.norm(right_hand_p1 - right_hand_p2, dim=-1)  # [B, T]
         
-        # Optional: Add weight decay over time (earlier frames have less weight)
-        # This encourages hands to get progressively closer
-        time_weights = torch.linspace(0.5, 1.0, hand_distances.shape[1], device=hand_distances.device)
-        weighted_distances = hand_distances * time_weights.unsqueeze(0)
-        interaction_loss = weighted_distances.mean()
+        # Define minimum distance to prevent overlap (e.g., 5cm)
+        min_distance = 0.1
+        target_distance = 0.16  # Target distance for high-five (8cm apart)
         
-        # Ensure hands are at reasonable height (around shoulder level)
-        target_height = 1.4  # meters
-        height_diff_p1 = (right_hand_p1[:, :, 2] - target_height).abs()
-        height_diff_p2 = (left_hand_p2[:, :, 2] - target_height).abs()
-        height_loss = (height_diff_p1.mean() + height_diff_p2.mean()) * 0.5
+        # Penalize both too far and too close
+        distance_error = (hand_distances - target_distance).abs()
+        # Add extra penalty for being too close (to prevent overlap)
+        overlap_penalty = torch.clamp(min_distance - hand_distances, min=0) * 10.0
         
-        # Add velocity matching loss to ensure smooth high-five
+        # Time weights: progressively more important toward the end
+        time_weights = torch.linspace(0.3, 1.0, hand_distances.shape[1], device=hand_distances.device)
+        weighted_distance_loss = (distance_error * time_weights).mean()
+        weighted_overlap_penalty = (overlap_penalty * time_weights).mean()
+        
+        # Check arm orientation to prevent backward rotation
+        # Vector from elbow to hand should point forward (positive y direction in most cases)
+        forearm_vec_p1 = right_hand_p1 - right_elbow_p1
+        forearm_vec_p2 = right_hand_p2 - right_elbow_p2
+        
+        # Normalize forearm vectors
+        forearm_vec_p1_norm = forearm_vec_p1 / (torch.norm(forearm_vec_p1, dim=-1, keepdim=True) + 1e-6)
+        forearm_vec_p2_norm = forearm_vec_p2 / (torch.norm(forearm_vec_p2, dim=-1, keepdim=True) + 1e-6)
+        
+        # Calculate the facing direction between two people
+        # This is the vector from person 1 to person 2 at the start
+        initial_facing = joints_person2[:, start_frame:start_frame+1, 0] - joints_person1[:, start_frame:start_frame+1, 0]
+        initial_facing[:, :, 2] = 0  # Only consider horizontal direction
+        initial_facing_norm = initial_facing / (torch.norm(initial_facing, dim=-1, keepdim=True) + 1e-6)
+        
+        # Penalize if forearm points backward relative to facing direction
+        # Dot product should be positive (pointing toward the other person)
+        forward_dot_p1 = (forearm_vec_p1_norm * initial_facing_norm).sum(dim=-1)
+        forward_dot_p2 = (forearm_vec_p2_norm * -initial_facing_norm).sum(dim=-1)  # Opposite direction for p2
+        
+        # Penalize negative dot products (backward facing arms)
+        backward_penalty_p1 = torch.clamp(-forward_dot_p1, min=0)
+        backward_penalty_p2 = torch.clamp(-forward_dot_p2, min=0)
+        orientation_loss = (backward_penalty_p1.mean() + backward_penalty_p2.mean()) * 0.5
+        
+        # Add a gentle preference for hands to be at similar heights
+        height_diff = (right_hand_p1[:, :, 2] - right_hand_p2[:, :, 2]).abs()
+        height_consistency_loss = height_diff.mean() * 0.5
+        
+        # Smooth velocity constraint (optional, keeps motion natural)
         if hand_distances.shape[1] > 1:
             vel_p1 = right_hand_p1[:, 1:] - right_hand_p1[:, :-1]
-            vel_p2 = left_hand_p2[:, 1:] - left_hand_p2[:, :-1]
-            # In the last few frames, velocities should be similar (moving together)
-            vel_diff = torch.norm(vel_p1 + vel_p2, dim=-1)  # They should move in opposite directions
-            vel_loss = vel_diff[:, -5:].mean() if vel_diff.shape[1] >= 5 else vel_diff.mean()
+            vel_p2 = right_hand_p2[:, 1:] - right_hand_p2[:, :-1]
+            # Penalize sudden velocity changes
+            if vel_p1.shape[1] > 1:
+                acc_p1 = vel_p1[:, 1:] - vel_p1[:, :-1]
+                acc_p2 = vel_p2[:, 1:] - vel_p2[:, :-1]
+                smoothness_loss = (torch.norm(acc_p1, dim=-1).mean() + torch.norm(acc_p2, dim=-1).mean()) * 0.1
+            else:
+                smoothness_loss = 0.0
         else:
-            vel_loss = 0.0
+            smoothness_loss = 0.0
         
-        return interaction_loss + 0.3 * height_loss + 0.2 * vel_loss
+        total_loss = (weighted_distance_loss + weighted_overlap_penalty + 
+                     0.5 * orientation_loss + 0.2 * height_consistency_loss + smoothness_loss)
+        
+        return total_loss
     
     return 0.0
+
+
+
 
 def optimize_two_person(history_motion_tensors, transf_rotmats, transf_transls, text_prompts, 
                        goal_joints_list, joints_masks, interaction_config):
