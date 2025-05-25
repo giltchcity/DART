@@ -43,39 +43,39 @@ from pytorch3d.transforms import matrix_to_axis_angle
 
 debug = 0
 
-# 增加场景采样密度
-NUM_POINTS_SAMPLE_FOR_VOLSMPL = 3000  # 从100增加到3000
+# Increase scene sampling density
+NUM_POINTS_SAMPLE_FOR_VOLSMPL = 3000  # Increased from 100 to 3000
 
-# 添加新的配置参数
-COLLISION_DETECTION_RADIUS = 2.5  # 增加检测范围到2.5米
-FRAME_SKIP_INTERVAL = 2  # 每两帧检测一次
+# Add new configuration parameters
+COLLISION_DETECTION_RADIUS = 2.5  # Increase detection range to 2.5 meters
+FRAME_SKIP_INTERVAL = 2  # Detect once every two frames
 
 
 
-# 2. 在你的导入部分后面，添加这些新函数：
+# 2. After your import section, add these new functions:
 
 def get_collision_body_parts_spatial(collision_mask, vertices, smpl_output):
     """
-    基于空间位置分析碰撞的身体部位
-    这个方法不依赖于关节映射，而是基于人体的空间分布
+    Analyze colliding body parts based on spatial position.
+    This method does not rely on joint mapping, but is based on the spatial distribution of the human body.
     """
     collision_indices = torch.where(collision_mask)[0]
     
     if len(collision_indices) == 0:
         return None
     
-    # 获取碰撞顶点
+    # Get collision vertices
     collision_vertices = vertices[collision_indices]
     
-    # 获取关键参考点
+    # Get key reference points
     if hasattr(smpl_output, 'joints') and smpl_output.joints is not None:
         joints = smpl_output.joints[0]  # [J, 3]
-        # 获取pelvis（第0个关节）
+        # Get pelvis (joint 0)
         pelvis = joints[0]
         
-        # 对于SMPL/SMPLX，这些是标准索引
-        # 但我们要安全地处理不同数量的关节
-        if joints.shape[0] >= 22:  # 至少有22个关节（SMPL基础）
+        # For SMPL/SMPLX, these are standard indices
+        # But we need to safely handle different numbers of joints
+        if joints.shape[0] >= 22:  # At least 22 joints (SMPL basic)
             try:
                 head = joints[15]  # head joint
             except:
@@ -83,29 +83,29 @@ def get_collision_body_parts_spatial(collision_mask, vertices, smpl_output):
         else:
             head = pelvis + torch.tensor([0, 1.7, 0], device=pelvis.device)
     else:
-        # 如果没有关节信息，使用顶点的统计信息
+        # If there's no joint information, use vertex statistics
         pelvis = vertices.mean(dim=0)
         vertices_max = vertices.max(dim=0)[0]
         vertices_min = vertices.min(dim=0)[0]
         height = vertices_max[1] - vertices_min[1]
         head = pelvis + torch.tensor([0, height * 0.9, 0], device=pelvis.device)
     
-    # 计算碰撞中心和范围
+    # Calculate collision center and range
     collision_center = collision_vertices.mean(dim=0)
     collision_min = collision_vertices.min(dim=0)[0]
     collision_max = collision_vertices.max(dim=0)[0]
     collision_size = collision_max - collision_min
     
-    # 计算相对位置
+    # Calculate relative position
     relative_to_pelvis = collision_center - pelvis
     height_relative = relative_to_pelvis[1].item()
     
-    # 计算身体的大致高度
+    # Calculate approximate body height
     body_height = (head[1] - pelvis[1]).item()
     if body_height <= 0:
-        body_height = 1.7  # 默认身高
+        body_height = 1.7  # Default height
     
-    # 确定高度区域
+    # Determine height region
     height_ratio = height_relative / body_height
     
     if height_ratio > 0.85:
@@ -131,8 +131,8 @@ def get_collision_body_parts_spatial(collision_mask, vertices, smpl_output):
     else:
         height_region = "ankles/feet"
     
-    # 确定左右位置
-    # 注意：在SMPL中，X轴正方向通常指向人体左侧
+    # Determine left-right position
+    # Note: In SMPL, the positive X-axis usually points to the left side of the human body
     lateral_offset = relative_to_pelvis[0].item()
     if abs(lateral_offset) < 0.08:
         side = "center"
@@ -141,7 +141,7 @@ def get_collision_body_parts_spatial(collision_mask, vertices, smpl_output):
     else:
         side = "right"
     
-    # 确定前后位置（Z轴）
+    # Determine front-back position (Z-axis)
     depth_offset = relative_to_pelvis[2].item()
     if abs(depth_offset) < 0.05:
         depth = ""
@@ -150,24 +150,24 @@ def get_collision_body_parts_spatial(collision_mask, vertices, smpl_output):
     else:
         depth = "back"
     
-    # 基于碰撞范围和位置推断是否是肢体末端
+    # Infer whether it's a limb extremity based on collision range and position
     max_dimension = collision_size.max().item()
     min_dimension = collision_size.min().item()
     
-    # 判断是否可能是手或脚
-    if max_dimension < 0.15:  # 小范围碰撞
-        if height_ratio < -0.8:  # 很低的位置
+    # Determine if it might be a hand or foot
+    if max_dimension < 0.15:  # Small range collision
+        if height_ratio < -0.8:  # Very low position
             detail = "foot"
-        elif height_ratio > 0.4 and abs(lateral_offset) > 0.3:  # 高位置且偏离中心
+        elif height_ratio > 0.4 and abs(lateral_offset) > 0.3:  # High position and off-center
             detail = "hand"
-        elif height_ratio > 0.7 and abs(lateral_offset) < 0.1:  # 头部区域
+        elif height_ratio > 0.7 and abs(lateral_offset) < 0.1:  # Head region
             detail = "head"
         else:
             detail = ""
     else:
         detail = ""
     
-    # 构建描述
+    # Build description
     parts = []
     parts.append(height_region)
     if side != "center":
@@ -179,7 +179,7 @@ def get_collision_body_parts_spatial(collision_mask, vertices, smpl_output):
     
     location_desc = " ".join(parts)
     
-    # 返回结构化信息
+    # Return structured information
     return {
         'location': location_desc,
         'num_vertices': len(collision_indices),
@@ -214,7 +214,7 @@ class OptimArgs:
     optim_unit_grad: int = 1
     optim_anneal_lr: int = 1
     weight_jerk: float = 0.0
-    weight_collision: float = 0.5  # 默认使用较高的碰撞权重
+    weight_collision: float = 0.5  # Default to use higher collision weight
     weight_contact: float = 0.0
     weight_skate: float = 0.0
     load_cache: int = 0
@@ -239,23 +239,23 @@ def batchify_smpl_output(smpl_output):
     return b_smpl_output_list
 
 def filter_scene_points_around_full_body(scene_points, joints, radius=COLLISION_DETECTION_RADIUS):
-    """改进的场景点过滤：基于所有关节位置而非只用pelvis"""
+    """Improved scene point filtering: based on all joint positions rather than just pelvis"""
     device = scene_points.device
     scene_pts = scene_points.squeeze(0)  # [N, 3]
     
     if joints.dim() == 3:  # [B, J, 3]
-        all_joints = joints[0]  # [J, 3] 取第一个batch的关节
+        all_joints = joints[0]  # [J, 3] Take joints from the first batch
     else:  # [J, 3]
         all_joints = joints
     
-    # 计算场景点到所有关节的最小距离
+    # Calculate minimum distance from scene points to all joints
     distances = torch.cdist(scene_pts.unsqueeze(0), all_joints.unsqueeze(0))[0]  # [N, J]
     min_distances = distances.min(dim=1)[0]  # [N]
     
-    # 保留距离任意关节小于radius的点
+    # Keep points within radius distance from any joint
     mask = min_distances <= radius
     
-    # 确保至少有足够的点进行碰撞检测
+    # Ensure there are enough points for collision detection
     if mask.sum() < 500:
         _, indices = torch.topk(min_distances, k=min(2000, len(min_distances)), largest=False)
         mask = torch.zeros_like(min_distances, dtype=torch.bool)
@@ -265,13 +265,13 @@ def filter_scene_points_around_full_body(scene_points, joints, radius=COLLISION_
     return filtered_points
 
 def filter_scene_points_around_body(scene_points, body_center, radius=COLLISION_DETECTION_RADIUS):
-    """原始的基于单点的过滤方法（保持兼容性）"""
+    """Original point-based filtering method (for compatibility)"""
     distances = torch.norm(scene_points.squeeze(0) - body_center.detach(), dim=1)
     mask = distances <= radius
     indices = torch.where(mask)[0]
     
     if indices.numel() == 0:
-        # 如果没有点在范围内，返回最近的1000个点
+        # If no points are in range, return the nearest 1000 points
         _, nearest_indices = torch.topk(distances, k=min(1000, len(distances)), largest=False)
         indices = nearest_indices
     
@@ -425,15 +425,15 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
 
         _, _, J, _, _ = motion_sequences["body_pose"].shape
 
-        # 只在选定的帧上进行碰撞检测（每FRAME_SKIP_INTERVAL帧）
+        # Only perform collision detection on selected frames (every FRAME_SKIP_INTERVAL frames)
         frame_indices = list(range(0, T, FRAME_SKIP_INTERVAL))
-        print(f"\n  [DEBUG] 步骤 {i+1}/{optim_steps}: 检测帧 {frame_indices} (共{len(frame_indices)}帧)")
+        print(f"\n  [DEBUG] Step {i+1}/{optim_steps}: Detecting frames {frame_indices} (total {len(frame_indices)} frames)")
         
         loss_collision = 0
         collision_count = 0
         total_collision_checks = 0
         
-        # 创建/获取SMPL模型（只创建一次）
+        # Create/get SMPL model (create only once)
         if 'model' not in scene_assets:
             model = smplx.create(model_path="./data/smplx_lockedhead_20230207/models_lockedhead/smplx/SMPLX_NEUTRAL.npz", 
                                gender='neutral', use_pca=True, num_pca_comps=12, num_betas=10, batch_size=1).to(device)
@@ -446,23 +446,23 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             frame_collision_loss = 0
             frame_collision_count = 0
             
-            # 获取当前帧的关节位置用于改进的场景点过滤
+            # Get current frame joint positions for improved scene point filtering
             current_joints = motion_sequences['joints'][:, frame_idx, :, :]  # [B, 22, 3]
             
-            # print(f"    [DEBUG] 帧 {frame_idx}: 处理 {B} 个batch")
+            # print(f"    [DEBUG] Frame {frame_idx}: Processing {B} batches")
             
-            # 为每个batch单独处理（修复的关键部分）
+            # Process each batch separately (key fix)
             for batch_idx in range(B):
                 total_collision_checks += 1
                 
-                # 获取单个batch的参数
+                # Get parameters for single batch
                 batch_transl = motion_sequences["transl"][batch_idx:batch_idx+1, frame_idx, :].reshape(1, 3)
                 batch_global_orient = matrix_to_axis_angle(
                     motion_sequences["global_orient"][batch_idx:batch_idx+1, frame_idx, :, :]).reshape(1, 3)
                 batch_body_pose = matrix_to_axis_angle(
                     motion_sequences["body_pose"][batch_idx:batch_idx+1, frame_idx, :, :, :]).reshape(1, J*3)
                 
-                # 基于该batch的关节位置过滤场景点
+                # Filter scene points based on this batch's joint positions
                 batch_joints = current_joints[batch_idx:batch_idx+1, :, :]  # [1, 22, 3]
                 filtered_scene_points = filter_scene_points_around_full_body(
                     scene_assets['sampled_points'], 
@@ -470,14 +470,14 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
                     radius=COLLISION_DETECTION_RADIUS
                 )
                 
-                # 运行SMPL前向传播（单个batch）
+                # Run SMPL forward pass (single batch)
                 smpl_output = scene_assets['model'](
                     transl=batch_transl,
                     global_orient=batch_global_orient,
                     body_pose=batch_body_pose,
                     return_verts=True, return_full_pose=True)
                 
-                # 检测碰撞
+                # Detect collision
                 loss, collision_mask = scene_assets['model'].volume.collision_loss(
                     filtered_scene_points, smpl_output, ret_collision_mask=True)
                 
@@ -486,7 +486,7 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
                     frame_collision_count += 1
                     collision_count += 1
                     
-                    # 使用新的碰撞分析函数
+                    # Use new collision analysis function
                     if collision_mask is not None:
                         collision_info = get_collision_body_parts_spatial(
                             collision_mask, 
@@ -495,17 +495,17 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
                         )
                         
                         if collision_info:
-                            print(f"    [DEBUG] 帧 {frame_idx}: 处理 ")
-                            print(f"      [COLLISION] Batch {batch_idx}: 损失 {loss.item():.6f}")
-                            print(f"        身体部位: {collision_info['location']}")
-                            print(f"        碰撞顶点数: {collision_info['num_vertices']}个")
-                            print(f"        相对高度: {collision_info['height_absolute']:.3f}m (比例: {collision_info['height_ratio']:.2f})")
-                            print(f"        位置细节: {collision_info['region']} - {collision_info['side']} - {collision_info['depth']}")
-                            print(f"        人体位置: {batch_transl[0].detach().cpu().numpy()}")
-                            print(f"        场景点数: {filtered_scene_points.shape[1]}")
+                            print(f"    [DEBUG] Frame {frame_idx}: Processing ")
+                            print(f"      [COLLISION] Batch {batch_idx}: Loss {loss.item():.6f}")
+                            print(f"        Body part: {collision_info['location']}")
+                            print(f"        Collision vertices: {collision_info['num_vertices']}")
+                            print(f"        Relative height: {collision_info['height_absolute']:.3f}m (ratio: {collision_info['height_ratio']:.2f})")
+                            print(f"        Position details: {collision_info['region']} - {collision_info['side']} - {collision_info['depth']}")
+                            print(f"        Body position: {batch_transl[0].detach().cpu().numpy()}")
+                            print(f"        Scene points: {filtered_scene_points.shape[1]}")
             
                 
-                # 清理内存
+                # Clean up memory
                 del loss
                 del smpl_output
                 if torch.cuda.is_available():
@@ -513,7 +513,7 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             
             loss_collision += frame_collision_loss
 
-        # 平均碰撞损失
+        # Average collision loss
         if len(frame_indices) > 0:
             loss_collision = loss_collision / len(frame_indices)
         
@@ -533,13 +533,13 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             noise.grad.data /= noise.grad.norm(p=2, dim=reduction_dims, keepdim=True).clamp(min=1e-6)
         optimizer.step()
         
-        print(f'  [SUMMARY] 步骤 {i+1}/{optim_steps}:')
-        print(f'    总损失: {loss.item():.6f}')
-        print(f'    目标损失: {loss_joints.item():.6f}')
-        print(f'    碰撞损失: {loss_collision.item() if hasattr(loss_collision, "item") else loss_collision:.6f} (权重: {optim_args.weight_collision})')
-        print(f'    碰撞检测: {collision_count}/{total_collision_checks} (检测到碰撞/总检测次数)')
-        print(f'    运动平滑度: {loss_jerk.item():.6f} (权重: {optim_args.weight_jerk})')
-        print(f'    地面接触: {loss_floor_contact.item():.6f} (权重: {optim_args.weight_contact})')
+        print(f'  [SUMMARY] Step {i+1}/{optim_steps}:')
+        print(f'    Total loss: {loss.item():.6f}')
+        print(f'    Target loss: {loss_joints.item():.6f}')
+        print(f'    Collision loss: {loss_collision.item() if hasattr(loss_collision, "item") else loss_collision:.6f} (weight: {optim_args.weight_collision})')
+        print(f'    Collision detection: {collision_count}/{total_collision_checks} (collisions detected/total checks)')
+        print(f'    Motion smoothness: {loss_jerk.item():.6f} (weight: {optim_args.weight_jerk})')
+        print(f'    Ground contact: {loss_floor_contact.item():.6f} (weight: {optim_args.weight_contact})')
 
     for key in motion_sequences:
         if torch.is_tensor(motion_sequences[key]):
@@ -614,12 +614,12 @@ if __name__ == '__main__':
 
     sampled_points = torch.cat([sampled_points, sampled_points_2], dim=1)
 
-    print(f"[INIT] 改进的碰撞检测配置:")
-    print(f"  检测半径: {COLLISION_DETECTION_RADIUS}m")
-    print(f"  帧检测间隔: {FRAME_SKIP_INTERVAL}")
-    print(f"  总场景点数: {sampled_points.shape[1]}")
-    print(f"  额外采样点数: {NUM_POINTS_SAMPLE_FOR_VOLSMPL}")
-    print(f"  使用改进的全身关节过滤方法")
+    print(f"[INIT] Improved collision detection configuration:")
+    print(f"  Detection radius: {COLLISION_DETECTION_RADIUS}m")
+    print(f"  Frame detection interval: {FRAME_SKIP_INTERVAL}")
+    print(f"  Total scene points: {sampled_points.shape[1]}")
+    print(f"  Additional sampling points: {NUM_POINTS_SAMPLE_FOR_VOLSMPL}")
+    print(f"  Using improved full-body joint filtering method")
 
     scene_assets = {
         'sampled_points': sampled_points,
@@ -699,6 +699,36 @@ if __name__ == '__main__':
                 all_motion_sequences['goal_location_idx'] += [num_goals - 1] * num_frames
             with open(cache_path, 'wb') as f:
                 pickle.dump([all_motion_sequences, history_motion_tensor, transf_rotmat, transf_transl], f)
+    
+    print("\n" + "="*60)
+    print("FINAL POSITION ANALYSIS")
+    print("="*60)
+    
+    # Get final frame joint positions
+    final_joints = all_motion_sequences['joints'][:, -1, :, :]  # [B, 22, 3] - last frame all joints
+    final_pelvis_positions = final_joints[:, 0, :]  # [B, 3] - last frame pelvis positions (joint 0 is pelvis)
+    
+    # Get final target position from last interaction
+    final_target_position = torch.tensor(
+        interaction_cfg['interactions'][-1]['goal_joints'][0], 
+        device=device, 
+        dtype=torch.float32
+    )  # [3]
+    
+    print(f"Target Position: [{final_target_position[0]:.3f}, {final_target_position[1]:.3f}, {final_target_position[2]:.3f}]")
+    print()
+    
+    for batch_idx in range(batch_size):
+        actual_pos = final_pelvis_positions[batch_idx]  # [3]
+        distance = torch.norm(actual_pos - final_target_position).item()
+        
+        print(f"Batch {batch_idx}:")
+        print(f"  Arrived Position: [{actual_pos[0]:.3f}, {actual_pos[1]:.3f}, {actual_pos[2]:.3f}]")
+        print(f"  Target Position:  [{final_target_position[0]:.3f}, {final_target_position[1]:.3f}, {final_target_position[2]:.3f}]")
+        print(f"  Distance Gap:     {distance:.3f}m")
+        print()
+    
+    print("="*60)
 
     for idx in range(batch_size):
         sequence = {
