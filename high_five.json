@@ -1,0 +1,36 @@
+{
+  "scene_dir": "/home/jixian22/Desktop/SCENE1/FOODLAB/",
+  "floor_height": 0.0,
+  "interaction_name": "high_five",
+  "interaction": {
+    "interaction_type": "high_five",
+    "interaction_frame": 100,
+    "meeting_point": [1.0, 0.0, 1.05], 
+    "people": [
+      {
+        "id": 0,
+        "text_prompt": "turn right*3, walk forward*2,raise only right hand*1,high five with right hand*4",
+        "init_joints": [
+          [0.0, 0.0, 1.05],
+          [-0.05, -0.05, 1.02],
+          [0.05, -0.05, 1.04]
+        ],
+        "goal_joints": [
+          [0.5, -0.1, 1.05]  
+        ]
+      },
+      {
+        "id": 1,
+        "text_prompt": "turn right*2, walk forward*3,raise only right hand*1,high five with right hand*4",
+        "init_joints": [
+          [2.5, 0.2, 1.05],
+          [2.55, 0.2, 1.02],
+          [2.45, 0.2, 1.04]
+        ],
+        "goal_joints": [
+          [1.6, 0.2, 1.05]  
+        ]
+      }
+    ]
+  }
+}
