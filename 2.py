@@ -443,7 +443,7 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             # 获取当前帧的关节位置用于改进的场景点过滤
             current_joints = motion_sequences['joints'][:, frame_idx, :, :]  # [B, 22, 3]
             
-            print(f"    [DEBUG] 帧 {frame_idx}: 处理 {B} 个batch")
+            
             
             # 为每个batch单独处理
             for batch_idx in range(B):
@@ -489,6 +489,7 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
                         )
                         
                         if collision_info:
+                            print(f"    [DEBUG] 帧 {frame_idx}: 处理 ")
                             print(f"      [COLLISION] Batch {batch_idx}: 损失 {loss.item():.6f}")
                             print(f"        身体部位: {collision_info['location']}")
                             print(f"        碰撞顶点数: {collision_info['num_vertices']}个")
