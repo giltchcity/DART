@@ -6,7 +6,7 @@ import random
 import time
 from typing import Literal
 from dataclasses import dataclass, asdict, make_dataclass
- 
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -49,9 +49,6 @@ NUM_POINTS_SAMPLE_FOR_VOLSMPL = 3000  # Increased from 100 to 3000
 # Add new configuration parameters
 COLLISION_DETECTION_RADIUS = 2.5  # Increase detection range to 2.5 meters
 FRAME_SKIP_INTERVAL = 2  # Detect once every two frames
-
-# Global collision method switch
-USE_VOLUMETRIC_SMPL = True  # True = VolumetricSMPL mode, False = SDF mode
 
 
 
@@ -428,175 +425,106 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
 
         _, _, J, _, _ = motion_sequences["body_pose"].shape
 
-        if USE_VOLUMETRIC_SMPL:
-            # Only perform collision detection on selected frames (every FRAME_SKIP_INTERVAL frames)
-            frame_indices = list(range(0, T, FRAME_SKIP_INTERVAL))
-            print(f"\n  [DEBUG] Step {i+1}/{optim_steps}: Detecting frames {frame_indices} (total {len(frame_indices)} frames)")
+        # Only perform collision detection on selected frames (every FRAME_SKIP_INTERVAL frames)
+        frame_indices = list(range(0, T, FRAME_SKIP_INTERVAL))
+        print(f"\n  [DEBUG] Step {i+1}/{optim_steps}: Detecting frames {frame_indices} (total {len(frame_indices)} frames)")
+        
+        loss_collision = 0
+        collision_count = 0
+        total_collision_checks = 0
+        
+        # Create/get SMPL model (create only once)
+        if 'model' not in scene_assets:
+            model = smplx.create(model_path="./data/smplx_lockedhead_20230207/models_lockedhead/smplx/SMPLX_NEUTRAL.npz", 
+                               gender='neutral', use_pca=True, num_pca_comps=12, num_betas=10, batch_size=1).to(device)
+            scene_assets['model'] = attach_volume(model, pretrained=True, device=device)
+         
+        # 使用scene sdf计算实际的loss_collision
+        joints_sdf = calc_point_sdf(scene_assets, global_joints.reshape(1, -1, 3)).reshape(B, T, 22)
+        negative_sdf_per_frame = (joints_sdf - joint_skin_dist.reshape(1, 1, 22)).clamp(max=0).sum(dim=-1)  # [B, T]
+        negative_sdf_mean = negative_sdf_per_frame.mean()
+        loss_collision = -negative_sdf_mean  # 这是实际使用的loss
+         
+        for frame_idx in frame_indices:
+            if frame_idx >= T:
+                continue
             
-            loss_collision = 0
-            collision_count = 0
-            total_collision_checks = 0
+            frame_collision_loss = 0
+            frame_collision_count = 0
             
-            # Create/get SMPL model (create only once)
-            if 'model' not in scene_assets:
-                model = smplx.create(model_path="./data/smplx_lockedhead_20230207/models_lockedhead/smplx/SMPLX_NEUTRAL.npz", 
-                                   gender='neutral', use_pca=True, num_pca_comps=12, num_betas=10, batch_size=1).to(device)
-                scene_assets['model'] = attach_volume(model, pretrained=True, device=device)
+            # Get current frame joint positions for improved scene point filtering
+            current_joints = motion_sequences['joints'][:, frame_idx, :, :]  # [B, 22, 3]
             
-            for frame_idx in frame_indices:
-                if frame_idx >= T:
-                    continue
-                
-                frame_collision_loss = 0
-                frame_collision_count = 0
-                
-                # Get current frame joint positions for improved scene point filtering
-                current_joints = motion_sequences['joints'][:, frame_idx, :, :]  # [B, 22, 3]
-                
-                # print(f"    [DEBUG] Frame {frame_idx}: Processing {B} batches")
-                
-                # Process each batch separately (key fix)
-                for batch_idx in range(B):
-                    total_collision_checks += 1
-                    
-                    # Get parameters for single batch
-                    batch_transl = motion_sequences["transl"][batch_idx:batch_idx+1, frame_idx, :].reshape(1, 3)
-                    batch_global_orient = matrix_to_axis_angle(
-                        motion_sequences["global_orient"][batch_idx:batch_idx+1, frame_idx, :, :]).reshape(1, 3)
-                    batch_body_pose = matrix_to_axis_angle(
-                        motion_sequences["body_pose"][batch_idx:batch_idx+1, frame_idx, :, :, :]).reshape(1, J*3)
-                    
-                    # Filter scene points based on this batch's joint positions
-                    batch_joints = current_joints[batch_idx:batch_idx+1, :, :]  # [1, 22, 3]
-                    filtered_scene_points = filter_scene_points_around_full_body(
-                        scene_assets['sampled_points'], 
-                        batch_joints, 
-                        radius=COLLISION_DETECTION_RADIUS
-                    )
-                    
-                    # Run SMPL forward pass (single batch)
-                    smpl_output = scene_assets['model'](
-                        transl=batch_transl,
-                        global_orient=batch_global_orient,
-                        body_pose=batch_body_pose,
-                        return_verts=True, return_full_pose=True)
-                    
-                    # Detect collision
-                    loss, collision_mask = scene_assets['model'].volume.collision_loss(
-                        filtered_scene_points, smpl_output, ret_collision_mask=True)
-                    
-                    if loss > 0:
-                        frame_collision_loss += loss
-                        frame_collision_count += 1
-                        collision_count += 1
-                        
-                        # Use new collision analysis function
-                        if collision_mask is not None:
-                            collision_info = get_collision_body_parts_spatial(
-                                collision_mask, 
-                                smpl_output.vertices[0],
-                                smpl_output
-                            )
-                            
-                            if collision_info:
-                                print(f"    [DEBUG] Frame {frame_idx}: Processing ")
-                                print(f"      [COLLISION] Batch {batch_idx}: Loss {loss.item():.6f}")
-                                print(f"        Body part: {collision_info['location']}")
-                                print(f"        Collision vertices: {collision_info['num_vertices']}")
-                                print(f"        Relative height: {collision_info['height_absolute']:.3f}m (ratio: {collision_info['height_ratio']:.2f})")
-                                print(f"        Position details: {collision_info['region']} - {collision_info['side']} - {collision_info['depth']}")
-                                print(f"        Body position: {batch_transl[0].detach().cpu().numpy()}")
-                                print(f"        Scene points: {filtered_scene_points.shape[1]}")
-                
-                    
-                    # Clean up memory
-                    del loss
-                    del smpl_output
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                
-                loss_collision += frame_collision_loss
-
-            # Average collision loss
-            if len(frame_indices) > 0:
-                loss_collision = loss_collision / len(frame_indices)
+            # print(f"    [DEBUG] Frame {frame_idx}: Processing {B} batches")
             
-            if loss_collision == 0.0:
-                loss_collision = torch.tensor(loss_collision, device=device)
-        else:
-            # SDF-based collision loss for training
-            print(f"\n  [DEBUG] Step {i+1}/{optim_steps}: Using SDF collision loss")
-            
-            # Calculate SDF-based collision loss for TRAINING
-            joints_sdf = calc_point_sdf(scene_assets, global_joints.reshape(1, -1, 3)).reshape(B, T, 22)
-            negative_sdf_per_frame = (joints_sdf - joint_skin_dist.reshape(1, 1, 22)).clamp(max=0).sum(
-                dim=-1)  # [B, T], clip negative sdf, sum over joints
-            negative_sdf_mean = negative_sdf_per_frame.mean()
-            loss_collision = -negative_sdf_mean
-            
-            # VolumetricSMPL collision info for DEBUG ONLY (every 10 steps to avoid slowdown)
-            collision_count = 0
-            total_collision_checks = 0
-            if i % 10 == 0:  # Only check every 10 steps for debug info
-                frame_indices = list(range(0, T, FRAME_SKIP_INTERVAL))
+            # Process each batch separately (key fix)
+            for batch_idx in range(B):
+                total_collision_checks += 1
                 
-                # Create/get SMPL model for debug info only
-                if 'model' not in scene_assets:
-                    model = smplx.create(model_path="./data/smplx_lockedhead_20230207/models_lockedhead/smplx/SMPLX_NEUTRAL.npz", 
-                                       gender='neutral', use_pca=True, num_pca_comps=12, num_betas=10, batch_size=1).to(device)
-                    scene_assets['model'] = attach_volume(model, pretrained=True, device=device)
+                # Get parameters for single batch
+                batch_transl = motion_sequences["transl"][batch_idx:batch_idx+1, frame_idx, :].reshape(1, 3)
+                batch_global_orient = matrix_to_axis_angle(
+                    motion_sequences["global_orient"][batch_idx:batch_idx+1, frame_idx, :, :]).reshape(1, 3)
+                batch_body_pose = matrix_to_axis_angle(
+                    motion_sequences["body_pose"][batch_idx:batch_idx+1, frame_idx, :, :, :]).reshape(1, J*3)
                 
-                for frame_idx in frame_indices[:2]:  # Only check first 2 frames for debug
-                    if frame_idx >= T:
-                        continue
+                # Filter scene points based on this batch's joint positions
+                batch_joints = current_joints[batch_idx:batch_idx+1, :, :]  # [1, 22, 3]
+                filtered_scene_points = filter_scene_points_around_full_body(
+                    scene_assets['sampled_points'], 
+                    batch_joints, 
+                    radius=COLLISION_DETECTION_RADIUS
+                )
+                
+                # Run SMPL forward pass (single batch)
+                smpl_output = scene_assets['model'](
+                    transl=batch_transl,
+                    global_orient=batch_global_orient,
+                    body_pose=batch_body_pose,
+                    return_verts=True, return_full_pose=True)
+                
+                # Detect collision
+                volumetric_loss, collision_mask = scene_assets['model'].volume.collision_loss(
+                    filtered_scene_points, smpl_output, ret_collision_mask=True)
+                
+                if volumetric_loss > 0:
+                    # frame_collision_loss += loss
+                    frame_collision_count += 1
+                    collision_count += 1
                     
-                    current_joints = motion_sequences['joints'][:, frame_idx, :, :]  # [B, 22, 3]
-                    
-                    for batch_idx in range(min(B, 1)):  # Only check first batch for debug
-                        total_collision_checks += 1
-                        
-                        # Get parameters for single batch
-                        batch_transl = motion_sequences["transl"][batch_idx:batch_idx+1, frame_idx, :].reshape(1, 3)
-                        batch_global_orient = matrix_to_axis_angle(
-                            motion_sequences["global_orient"][batch_idx:batch_idx+1, frame_idx, :, :]).reshape(1, 3)
-                        batch_body_pose = matrix_to_axis_angle(
-                            motion_sequences["body_pose"][batch_idx:batch_idx+1, frame_idx, :, :, :]).reshape(1, J*3)
-                        
-                        # Filter scene points
-                        batch_joints = current_joints[batch_idx:batch_idx+1, :, :]
-                        filtered_scene_points = filter_scene_points_around_full_body(
-                            scene_assets['sampled_points'], 
-                            batch_joints, 
-                            radius=COLLISION_DETECTION_RADIUS
+                    # Use new collision analysis function
+                    if collision_mask is not None:
+                        collision_info = get_collision_body_parts_spatial(
+                            collision_mask, 
+                            smpl_output.vertices[0],
+                            smpl_output
                         )
                         
-                        # Run SMPL forward pass
-                        smpl_output = scene_assets['model'](
-                            transl=batch_transl,
-                            global_orient=batch_global_orient,
-                            body_pose=batch_body_pose,
-                            return_verts=True, return_full_pose=True)
-                        
-                        # Detect collision for DEBUG INFO ONLY (not used for training)
-                        debug_loss, collision_mask = scene_assets['model'].volume.collision_loss(
-                            filtered_scene_points, smpl_output, ret_collision_mask=True)
-                        
-                        if debug_loss > 0:
-                            collision_count += 1
-                            if collision_mask is not None:
-                                collision_info = get_collision_body_parts_spatial(
-                                    collision_mask, 
-                                    smpl_output.vertices[0],
-                                    smpl_output
-                                )
-                                if collision_info:
-                                    print(f"      [DEBUG INFO] VolumetricSMPL: Frame {frame_idx}, Body part: {collision_info['location']}")
-                        
-                        # Clean up memory
-                        del debug_loss
-                        del smpl_output
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                        if collision_info:
+                            print(f"    [DEBUG] Frame {frame_idx}: Processing ")
+                            print(f"      [COLLISION] Batch {batch_idx}: VolumetricSMPL Loss {volumetric_loss.item():.6f}")
+                            print(f"        Body part: {collision_info['location']}")
+                            print(f"        Collision vertices: {collision_info['num_vertices']}")
+                            print(f"        Relative height: {collision_info['height_absolute']:.3f}m (ratio: {collision_info['height_ratio']:.2f})")
+                            print(f"        Position details: {collision_info['region']} - {collision_info['side']} - {collision_info['depth']}")
+                            print(f"        Body position: {batch_transl[0].detach().cpu().numpy()}")
+                            print(f"        Scene points: {filtered_scene_points.shape[1]}")
+            
+                
+                # Clean up memory
+                del volumetric_loss  
+                del smpl_output
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
+            loss_collision += frame_collision_loss
+
+        # Average collision loss
+        if len(frame_indices) > 0:
+            loss_collision = loss_collision / len(frame_indices)
+        
+        if loss_collision == 0.0:
+            loss_collision = torch.tensor(loss_collision, device=device)
 
         joints_sdf = calc_point_sdf(scene_assets, global_joints.reshape(1, -1, 3)).reshape(B, T, 22)
         foot_joints_sdf = joints_sdf[:, :, FOOT_JOINTS_IDX]  # [B, T, 2]
@@ -611,17 +539,19 @@ def optimize(history_motion_tensor, transf_rotmat, transf_transl, text_prompt, g
             noise.grad.data /= noise.grad.norm(p=2, dim=reduction_dims, keepdim=True).clamp(min=1e-6)
         optimizer.step()
         
-        mode_name = "VolumetricSMPL" if USE_VOLUMETRIC_SMPL else "SDF"
-        print(f'  [SUMMARY] Step {i+1}/{optim_steps} ({mode_name}):')
+        # print(f'  [SUMMARY] Step {i+1}/{optim_steps}:')
+        # print(f'    Total loss: {loss.item():.6f}')
+        # print(f'    Target loss: {loss_joints.item():.6f}')
+        # print(f'    Collision loss: {loss_collision.item() if hasattr(loss_collision, "item") else loss_collision:.6f} (weight: {optim_args.weight_collision})')
+        # print(f'    Collision detection: {collision_count}/{total_collision_checks} (collisions detected/total checks)')
+        # print(f'    Motion smoothness: {loss_jerk.item():.6f} (weight: {optim_args.weight_jerk})')
+        # print(f'    Ground contact: {loss_floor_contact.item():.6f} (weight: {optim_args.weight_contact})')
+     
+        print(f'  [SUMMARY] Step {i+1}/{optim_steps}:')
         print(f'    Total loss: {loss.item():.6f}')
         print(f'    Target loss: {loss_joints.item():.6f}')
-        print(f'    Collision loss: {loss_collision.item() if hasattr(loss_collision, "item") else loss_collision:.6f} (weight: {optim_args.weight_collision})')
-        if USE_VOLUMETRIC_SMPL:
-            print(f'    Collision detection: {collision_count}/{total_collision_checks} (collisions detected/total checks)')
-        else:
-            print(f'    SDF-based training active')
-            if total_collision_checks > 0:
-                print(f'    VolumetricSMPL debug: {collision_count}/{total_collision_checks} (info only)')
+        print(f'    Collision loss (SDF): {loss_collision.item():.6f} (weight: {optim_args.weight_collision})')
+        print(f'    VolumetricSMPL detection: {collision_count}/{total_collision_checks} (for debug only)')
         print(f'    Motion smoothness: {loss_jerk.item():.6f} (weight: {optim_args.weight_jerk})')
         print(f'    Ground contact: {loss_floor_contact.item():.6f} (weight: {optim_args.weight_contact})')
 
@@ -698,20 +628,12 @@ if __name__ == '__main__':
 
     sampled_points = torch.cat([sampled_points, sampled_points_2], dim=1)
 
-    collision_mode = "VolumetricSMPL" if USE_VOLUMETRIC_SMPL else "SDF"
-    print(f"\n[COLLISION MODE] Using {collision_mode} method")
-    if USE_VOLUMETRIC_SMPL:
-        print("  - VolumetricSMPL collision loss for training")
-        print("  - Detailed collision detection and analysis")
-        print(f"[INIT] Improved collision detection configuration:")
-        print(f"  Detection radius: {COLLISION_DETECTION_RADIUS}m")
-        print(f"  Frame detection interval: {FRAME_SKIP_INTERVAL}")
-        print(f"  Total scene points: {sampled_points.shape[1]}")
-        print(f"  Additional sampling points: {NUM_POINTS_SAMPLE_FOR_VOLSMPL}")
-        print(f"  Using improved full-body joint filtering method")
-    else:
-        print("  - SDF-based collision loss for training")
-        print("  - VolumetricSMPL for debug information only")
+    print(f"[INIT] Improved collision detection configuration:")
+    print(f"  Detection radius: {COLLISION_DETECTION_RADIUS}m")
+    print(f"  Frame detection interval: {FRAME_SKIP_INTERVAL}")
+    print(f"  Total scene points: {sampled_points.shape[1]}")
+    print(f"  Additional sampling points: {NUM_POINTS_SAMPLE_FOR_VOLSMPL}")
+    print(f"  Using improved full-body joint filtering method")
 
     scene_assets = {
         'sampled_points': sampled_points,
